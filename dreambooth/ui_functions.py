@@ -196,7 +196,7 @@ def performance_wizard(model_name):
         total_images = 0
         for concept in config.concepts():
             idd = concept.instance_data_dir
-            if idd != "" and idd is not None and os.path.exists(idd):
+            if idd and os.path.exists(idd):
                 images = get_images(idd)
                 total_images += len(images)
         print(f"Total images: {total_images}")
@@ -686,10 +686,7 @@ def start_training(model_dir: str, class_gen_method: str = "Native Diffusers"):
         msg = "Please configure some concepts."
     if not os.path.exists(config.pretrained_model_name_or_path):
         msg = "Invalid training data directory."
-    if (
-            config.pretrained_vae_name_or_path != ""
-            and config.pretrained_vae_name_or_path is not None
-    ):
+    if config.pretrained_vae_name_or_path:
         if not os.path.exists(config.pretrained_vae_name_or_path):
             msg = "Invalid Pretrained VAE Path."
     if config.resolution <= 0:
@@ -750,7 +747,7 @@ def start_training(model_dir: str, class_gen_method: str = "Native Diffusers"):
     cleanup()
     reload_system_models()
     lora_model_name = ""
-    if config.lora_model_name != "" and config.lora_model_name is not None:
+    if config.lora_model_name:
         lora_model_name = f"{config.model_name}_{total_steps}.pt"
     dirs = get_lora_models()
     lora_model_name = gr_update(choices=sorted(dirs), value=lora_model_name)
@@ -821,10 +818,7 @@ def ui_classifiers(model_name: str, class_gen_method: str = "Native Diffusers"):
         msg = "Please configure some concepts."
     if not os.path.exists(config.pretrained_model_name_or_path):
         msg = "Invalid training data directory."
-    if (
-            config.pretrained_vae_name_or_path != ""
-            and config.pretrained_vae_name_or_path is not None
-    ):
+    if config.pretrained_vae_name_or_path:
         if not os.path.exists(config.pretrained_vae_name_or_path):
             msg = "Invalid Pretrained VAE Path."
     if config.resolution <= 0:
@@ -925,6 +919,7 @@ def start_crop(
         out_status = (
             f"{'Saved' if not dry_run else 'Previewed'} {total_images} cropped images."
         )
+    status.end()
     return out_status, out_images
 
 
@@ -991,7 +986,6 @@ def create_model(
     printm("Extraction complete.")
     if sh is not None:
         sh.end(desc="Extraction complete.")
-    status.end()
 
     return result
 
@@ -1000,7 +994,7 @@ def debug_collate_fn(examples):
     input_ids = [example["input_ids"] for example in examples]
     pixel_values = [example["image"] for example in examples]
     loss_weights = torch.tensor(
-        [example["loss_weight"] for example in examples], dtype=torch.float32
+        [example["res"] for example in examples], dtype=torch.float32
     )
     batch = {
         "input_ids": input_ids,
@@ -1014,9 +1008,11 @@ def debug_buckets(model_name, num_epochs, batch_size):
     print("Debug click?")
     status.textinfo = "Preparing dataset..."
     if model_name == "" or model_name is None:
+        status.end()
         return "No model selected."
     args = from_file(model_name)
     if args is None:
+        status.end()
         return "Invalid config."
     print("Preparing prompt dataset...")
 
@@ -1107,4 +1103,5 @@ def debug_buckets(model_name, num_epochs, batch_size):
         cleanup()
     except:
         pass
+    status.end()
     return "", f"Debug output saved to {bucket_file}"
