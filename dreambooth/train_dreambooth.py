@@ -27,7 +27,7 @@ from diffusers import (
 )
 from diffusers.utils import logging as dl, is_xformers_available
 from packaging import version
-from tensorflow.python.framework.random_seed import set_seed as set_seed1
+import tensorflow
 from torch.cuda.profiler import profile
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
@@ -112,7 +112,7 @@ def set_seed(deterministic: bool):
     if deterministic:
         torch.backends.cudnn.deterministic = True
         seed = 0
-        set_seed1(seed)
+        tf.random.set_seed(seed)
         set_seed2(seed)
     else:
         torch.backends.cudnn.deterministic = False
@@ -864,6 +864,11 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
             # Create the pipeline using the trained modules and save it.
             if accelerator.is_main_process:
                 printm("Pre-cleanup.")
+
+                torch_rng_state = torch.get_rng_state()
+                cuda_gpu_rng_state = torch.cuda.get_rng_state(device="cuda")
+                cuda_cpu_rng_state = torch.cuda.get_rng_state(device="cpu")
+
                 optim_to(profiler, optimizer)
                 if profiler is not None:
                     cleanup()
@@ -1127,6 +1132,9 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                 status.current_image = last_samples
                 printm("Cleanup.")
                 optim_to(profiler, optimizer, accelerator.device)
+                torch.set_rng_state(torch_rng_state)
+                torch.cuda.set_rng_state(cuda_cpu_rng_state, device="cpu")
+                torch.cuda.set_rng_state(cuda_gpu_rng_state, device="cuda")
                 cleanup()
                 printm("Cleanup completed.")
 

@@ -1253,6 +1253,7 @@ def on_ui_tabs():
             db_revision,
             db_sample_batch_size,
             db_sanity_prompt,
+            db_sanity_negative_prompt,
             db_sanity_seed,
             db_save_ckpt_after,
             db_save_ckpt_cancel,

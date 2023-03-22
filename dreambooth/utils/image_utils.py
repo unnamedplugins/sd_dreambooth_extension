@@ -103,6 +103,31 @@ def sort_prompts(concept: Concept, text_getter: FilenameTextGetter, img_dir: str
         if h > max_dim:
             max_dim = h
     _, dirr = os.path.split(img_dir)
+
+    if not is_class:
+        bucket_count = {}
+        for bucket in bucket_resos:
+            bucket_count[bucket] = 0
+
+        for img in images:
+            pbar.set_description(f"Pre-processing images: {dirr}")
+            w, h = get_dim(img, max_dim)
+            reso = closest_resolution(w, h, bucket_resos)
+            if reso not in bucket_count:
+                bucket_count[reso] = 0
+            bucket_count[reso] += 1
+
+        num_buckets = len(bucket_count)
+        bucket_avg_size = len(images) / num_buckets
+        lonely_buckets = []
+        for res, count in bucket_count.items():
+            if count < min(bucket_avg_size, 4):
+                lonely_buckets.append(res)
+
+        # find a new home for the lonely bucket images
+        for bucket in lonely_buckets:
+            bucket_resos.remove(bucket)
+
     for img in images:
         # Get prompt
         pbar.set_description(f"Pre-processing images: {dirr}")
@@ -180,15 +205,15 @@ class FilenameTextGetter:
                             token_regex = re.compile(f"\\b{token}\\b", flags=re.IGNORECASE)
                             output = token_regex.sub(class_token, output)
 
-                        # Now, replace class with instance + class tokens
-                        output = class_regex.sub(f"{instance_token} {class_token}", output)
+                    # Now, replace class with instance + class tokens
+                    output = class_regex.sub(f"{instance_token}, {class_token}", output)
                 else:
                     # If class is not in the string, check if instance is
                     if instance_regex.search(output):
-                        output = instance_regex.sub(f"{instance_token} {class_token}", output)
+                        output = instance_regex.sub(f"{instance_token}, {class_token}", output)
                     else:
                         # Description only, insert both at the front?
-                        output = f"{instance_token} {class_token}, {output}"
+                        output = f"{instance_token}, {class_token}, {output}"
 
         elif instance_token != "" and not is_class:
             output = f"{instance_token}, {output}"
@@ -229,20 +254,53 @@ def get_scheduler_class(scheduler_name):
     return scheduler_class
 
 
-def make_bucket_resolutions(max_resolution, divisible=32) -> List[Tuple[int, int]]:
-    aspect_ratios = [(16, 9), (5, 4), (4, 3), (3, 2), (2, 1), (1, 1)]
+def make_bucket_resolutions(max_resolution, divisible=64) -> List[Tuple[int, int]]:
     resos = set()
 
-    for ar in aspect_ratios:
-        d0 = max_resolution
-        d1_t = (max_resolution / ar[0]) * ar[1]
-        d1 = int((d1_t // divisible) * divisible)
+    total_px = max_resolution ** 2
+    min_thresh = total_px * 0.95
+    minmult = int(384/divisible)
+    maxmult = int(2048/divisible)
 
-        w = d0
-        h = d1
+    for x in range(minmult, math.ceil(maxmult/2)):
+        for y in range(x, maxmult):
+            w = x * divisible
+            h = y * divisible
+            if w == h and w != max_resolution:
+                continue
+            px = w * h
+            if px > total_px:
+                break
+            if px < min_thresh:
+                continue
 
-        resos.add((w, h))
-        resos.add((h, w))
+            resos.add((w, h))
+            resos.add((h, w))
+
+
+
+    # midmult = int(max_resolution/divisible)
+    # maxmult = int(midmult * 2 - minmult)
+    #
+    #
+    # for x in range(startmult, midmult):
+    #     w = (midmult - x) * divisible
+    #     h = (midmult + x) * divisible
+    #     resos.add((w, h))
+    #     resos.add((h, w))
+
+    # aspect_ratios = [(16, 9), (7, 5), (5, 4), (4, 3), (3, 2), (2, 1), (1, 1)]
+    #
+    # for ar in aspect_ratios:
+    #     d0 = max_resolution
+    #     d1_t = (max_resolution / ar[0]) * ar[1]
+    #     d1 = int((d1_t // divisible) * divisible)
+    #
+    #     w = d0
+    #     h = d1
+    #
+    #     resos.add((w, h))
+    #     resos.add((h, w))
 
     resos = list(resos)
     resos.sort()
@@ -250,13 +308,17 @@ def make_bucket_resolutions(max_resolution, divisible=32) -> List[Tuple[int, int
 
 
 def closest_resolution(width, height, resos) -> Tuple[int, int]:
-    def distance(reso):
-        w, h = reso
-        if w > width + 7 or h > height + 7:
-            return float("inf")
-        return (w - width) ** 2 + (h - height) ** 2
 
-    return min(resos, key=distance)
+    pixel_counts = [reso[0] * reso[1] for reso in resos]
+    target_pixels = max(pixel_counts)
+
+    def distance(reso):
+        ratio = width / height
+        w, h = reso
+        return abs((w/h) - ratio) * (target_pixels / (w*h))
+
+    res = min(resos, key=distance)
+    return res
 
 
 txt2img_available = False
