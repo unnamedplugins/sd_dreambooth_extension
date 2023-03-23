@@ -186,7 +186,7 @@ class FilenameTextGetter:
         if instance_token and class_token:
             instance_regex = re.compile(f"\\b{instance_token}\\b", flags=re.IGNORECASE)
             class_regex = re.compile(f"\\b{class_token}\\b", flags=re.IGNORECASE)
-            extended_class_regexes = list(re.compile(r) for r in [f"a {class_token}", f"the {class_token}", f"an {class_token}", class_token])
+            extended_class_regexes = list(re.compile(r) for r in [f"a {class_token}", f"the {class_token}", f"an {class_token}"])
 
             if is_class:
                 if instance_regex.search(output):

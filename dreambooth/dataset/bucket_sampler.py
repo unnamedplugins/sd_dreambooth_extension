@@ -69,7 +69,8 @@ class BucketSampler:
 
     def fill_batch(self):
         current_res = self.active_resos[self.current_bucket]
-        self.dataset.shuffle_buckets()
+        if self.total_samples == 0:
+            self.dataset.shuffle_buckets()
         batch = []
         repeats = 0
         while len(batch) < self.batch_size:

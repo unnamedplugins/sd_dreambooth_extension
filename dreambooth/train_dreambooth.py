@@ -66,6 +66,8 @@ from lora_diffusion.lora import (
     get_target_module,
 )
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 # define a Handler which writes DEBUG messages or higher to the sys.stderr
 console = logging.StreamHandler()
@@ -1274,8 +1276,8 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
 
                     if not args.split_loss:
                         loss = instance_loss = torch.nn.functional.mse_loss(
-                            noise_pred.float(), target.float(), reduction="mean"
-                        )
+                            noise_pred.float(), target.float(), reduction="none"
+                        ).mean([1, 2, 3])
                         loss *= batch["loss_avg"]
 
                     else:
@@ -1306,8 +1308,8 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                             model_pred = torch.stack(instance_chunks, dim=0)
                             target = torch.stack(instance_pred_chunks, dim=0)
                             instance_loss = torch.nn.functional.mse_loss(
-                                model_pred.float(), target.float(), reduction="mean"
-                            )
+                                model_pred.float(), target.float(), reduction="none"
+                            ).mean([1, 2, 3, 4])
 
                         if len(prior_pred_chunks):
                             model_pred_prior = torch.stack(prior_chunks, dim=0)
@@ -1315,16 +1317,28 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                             prior_loss = torch.nn.functional.mse_loss(
                                 model_pred_prior.float(),
                                 target_prior.float(),
-                                reduction="mean",
-                            )
+                                reduction="none",
+                            ).mean([1, 2, 3, 4])
 
                         if len(instance_chunks) and len(prior_chunks):
                             # Add the prior loss to the instance loss.
-                            loss = instance_loss + current_prior_loss_weight * prior_loss
+                            loss = torch.zeros(len(instance_chunks) + len(prior_chunks), device=accelerator.device)
+                            # If the first entry is a prior, ensure that the prior is first in the array
+                            if batch["types"][0]:
+                                loss[1::2] = instance_loss
+                                loss[::2] = current_prior_loss_weight * prior_loss
+                            else:
+                                loss[::2] = instance_loss
+                                loss[1::2] = current_prior_loss_weight * prior_loss
+                            # loss = instance_loss + current_prior_loss_weight * prior_loss
                         elif len(instance_chunks):
                             loss = instance_loss
                         else:
                             loss = prior_loss * current_prior_loss_weight
+
+                    loss = apply_snr_weight(loss, timesteps, noise_scheduler, 5.0)
+                    loss = loss.mean()
+
                     accelerator.backward(loss)
                     if accelerator.sync_gradients and not args.use_lora:
                         params_to_clip = (
@@ -1365,8 +1379,8 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                     logs = {
                         "lr": float(last_lr),
                         "loss": float(loss_step),
-                        "inst_loss": float(instance_loss.detach().item()),
-                        "prior_loss": float(prior_loss.detach().item()),
+                        "inst_loss": float(instance_loss.detach().mean().item()),
+                        "prior_loss": float(prior_loss.detach().mean().item()),
                         "vram": float(cached),
                     }
                 else:
@@ -1460,3 +1474,17 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
         return result
 
     return inner_loop()
+
+def apply_snr_weight(loss, timesteps, noise_scheduler, gamma):
+    alphas_cumprod = noise_scheduler.alphas_cumprod.cpu()
+    sqrt_alphas_cumprod = np.sqrt(alphas_cumprod)
+    sqrt_one_minus_alphas_cumprod = np.sqrt(1.0 - alphas_cumprod)
+    alpha = sqrt_alphas_cumprod
+    sigma = sqrt_one_minus_alphas_cumprod
+    all_snr = (alpha / sigma) ** 2
+    all_snr.to(loss.device)
+    snr = torch.stack([all_snr[t] for t in timesteps])
+    gamma_over_snr = torch.div(torch.ones_like(snr)*gamma,snr)
+    snr_weight = torch.minimum(gamma_over_snr,torch.ones_like(gamma_over_snr)).float().to(loss.device) #from paper
+    loss = loss * snr_weight
+    return loss
