@@ -190,7 +190,7 @@ class ImageBuilder:
                 from modules import shared as auto_shared
 
                 p = StableDiffusionProcessingTxt2Img(
-                    sampler_name='Euler a',
+                    sampler_name='DPM++ 2M Karras',
                     sd_model=auto_shared.sd_model,
                     prompt=positive_prompts,
                     negative_prompt=negative_prompts,

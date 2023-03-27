@@ -523,7 +523,7 @@ def compile_checkpoint(model_name: str, lora_file_name: str = None, reload_model
                 f"{config_version}.yaml"
             )
 
-        if cfg_file is not None:
+        if cfg_file is not None and config_version != "v1-inference":
             cfg_dest = checkpoint_path.replace(checkpoint_ext, ".yaml")
             printi(f"Copying config file from {cfg_dest} to {cfg_dest}", log=log)
             shutil.copyfile(cfg_file, cfg_dest)

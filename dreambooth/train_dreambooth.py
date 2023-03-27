@@ -27,7 +27,7 @@ from diffusers import (
 )
 from diffusers.utils import logging as dl, is_xformers_available
 from packaging import version
-import tensorflow
+import tensorflow as tf
 from torch.cuda.profiler import profile
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
@@ -1264,8 +1264,8 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                                 prior_pred_chunks.append(target_pred_chunks[i])
 
                         # initialize with 0 in case we are having batch = 1
-                        instance_loss = torch.tensor(0)
-                        prior_loss = torch.tensor(0)
+                        instance_loss = torch.tensor(0.0)
+                        prior_loss = torch.tensor(0.0)
 
                         # Concatenate the chunks in instance_chunks to form the model_pred_instance tensor
                         if len(instance_chunks):
