@@ -721,9 +721,9 @@ def start_training(model_dir: str, class_gen_method: str = "Native Diffusers"):
             status.textinfo = "Initializing dreambooth training..."
             print(status.textinfo)
             try:
-                from dreambooth.train_dreambooth import main  # noqa
+                from dreambooth.train_dreambooth_testing import main  # noqa
             except:
-                from dreambooth.train_dreambooth import main  # noqa
+                from dreambooth.train_dreambooth_testing import main  # noqa
             result = main(class_gen_method=class_gen_method)
 
         config = result.config

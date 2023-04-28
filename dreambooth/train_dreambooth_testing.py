@@ -6,6 +6,7 @@ import itertools
 import logging
 import math
 import os
+import random
 import time
 import traceback
 from decimal import Decimal
@@ -117,8 +118,13 @@ def set_seed(deterministic: bool):
         seed = 0
         tf.random.set_seed(seed)
         set_seed2(seed)
+        random.seed(seed)
     else:
         torch.backends.cudnn.deterministic = False
+        seed = random.randint(0, 1000000)
+        tf.random.set_seed(seed)
+        set_seed2(seed)
+        random.seed(seed)
 
 
 def current_prior_loss(args, current_epoch):
@@ -383,6 +389,18 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
         lora_path = None
         lora_txt = None
 
+        # TODO figure this out
+
+        # TODO resnets, attentions
+        # 'attention' in param[0] and
+        # unet_params_to_optimize = [x[1] for x in filter(lambda param: ('mid_block' in param[0] or 'down_blocks.2' in param[0]), list(unet.named_parameters()))]
+        # unet_params_to_optimize = [x[1] for x in filter(lambda param: 'attention' in param[0] and ('mid_block' in param[0] or 'down_blocks.2' in param[0]), list(unet.named_parameters()))]
+        # unet_params_to_optimize = [x[1] for x in filter(lambda param: 'attention' in param[0] and 'mid_block' in param[0], list(unet.named_parameters()))]
+        unet_params_to_optimize = [x[1] for x in filter(lambda param: 'mid_block' in param[0], list(unet.named_parameters()))]
+        # unet_params_to_optimize = unet.parameters()
+
+        tenc_params_to_optimize = [x[1] for x in filter(lambda param: 'attn' in param[0], list(text_encoder.named_parameters()))]
+        # tenc_params_to_optimize = text_encoder.parameters()
         if args.use_lora:
             if args.lora_model_name:
                 lora_path = os.path.join(args.model_dir, "loras", args.lora_model_name)
@@ -432,11 +450,13 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
 
         elif stop_text_percentage != 0:
             if args.train_unet:
-                params_to_optimize = itertools.chain(unet.parameters(), text_encoder.parameters())
+
+                params_to_optimize = itertools.chain(unet_params_to_optimize,
+                                                     tenc_params_to_optimize)
             else:
-                params_to_optimize = itertools.chain(text_encoder.parameters())
+                params_to_optimize = itertools.chain(tenc_params_to_optimize)
         else:
-            params_to_optimize = unet.parameters()
+            params_to_optimize = unet_params_to_optimize
 
         optimizer = get_optimizer(args, params_to_optimize)
 
@@ -486,6 +506,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
             vae=vae if args.cache_latents else None,
             debug=False,
             model_dir=args.model_dir,
+            max_tokens=args.max_token_length
         )
 
         printm("Dataset loaded.")
@@ -548,11 +569,11 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
             num_workers=n_workers,
         )
 
-        max_train_steps = args.num_train_epochs * len(train_dataset)
+        max_train_steps = args.num_train_epochs * sampler.get_num_steps()
 
         # This is separate, because optimizer.step is only called once per "step" in training, so it's not
         # affected by batch size
-        sched_train_steps = args.num_train_epochs * train_dataset.num_train_images
+        sched_train_steps = args.num_train_epochs * sampler.get_num_steps()
 
         lr_scale_pos = args.lr_scale_pos
         if class_prompts:
@@ -767,6 +788,284 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
 
             return save_model
 
+        def save_weights(
+                save_image, save_model, save_snapshot, save_checkpoint, save_lora
+        ):
+            global last_samples
+            global last_prompts
+            nonlocal vae
+
+            printm(" Saving weights.")
+            pbar = mytqdm(
+                range(4),
+                desc="Saving weights",
+                disable=not accelerator.is_local_main_process,
+                position=1
+            )
+            pbar.set_postfix(refresh=True)
+
+            # Create the pipeline using the trained modules and save it.
+            if accelerator.is_main_process:
+                printm("Pre-cleanup.")
+
+                # Save random states so sample generation doesn't impact training.
+                if shared.device.type == 'cuda':
+                    torch_rng_state = torch.get_rng_state()
+                    cuda_gpu_rng_state = torch.cuda.get_rng_state(device="cuda")
+                    cuda_cpu_rng_state = torch.cuda.get_rng_state(device="cpu")
+
+                optim_to(profiler, optimizer)
+
+                if profiler is not None:
+                    cleanup()
+
+                if vae is None:
+                    printm("Loading vae.")
+                    vae = create_vae()
+
+                printm("Creating pipeline.")
+
+                s_pipeline = DiffusionPipeline.from_pretrained(
+                    args.pretrained_model_name_or_path,
+                    unet=accelerator.unwrap_model(unet, keep_fp32_wrapper=True),
+                    text_encoder=accelerator.unwrap_model(
+                        text_encoder, keep_fp32_wrapper=True
+                    ),
+                    vae=vae,
+                    torch_dtype=weight_dtype,
+                    revision=args.revision,
+                    safety_checker=None,
+                    requires_safety_checker=None,
+                )
+
+                scheduler_class = get_scheduler_class(args.scheduler)
+                if args.attention == "xformers" and not shared.force_cpu:
+                    xformerify(s_pipeline)
+
+                s_pipeline.scheduler = scheduler_class.from_config(
+                    s_pipeline.scheduler.config
+                )
+                if "UniPC" in args.scheduler:
+                    s_pipeline.scheduler.config.solver_type = "bh2"
+
+                s_pipeline = s_pipeline.to(accelerator.device)
+
+                with accelerator.autocast(), torch.inference_mode():
+                    if save_model:
+                        # We are saving weights, we need to ensure revision is saved
+                        args.save()
+                        try:
+                            out_file = None
+                            # Loras resume from pt
+                            if not args.use_lora:
+                                if save_snapshot:
+                                    pbar.set_description("Saving Snapshot")
+                                    status.textinfo = (
+                                        f"Saving snapshot at step {args.revision}..."
+                                    )
+                                    accelerator.save_state(
+                                        os.path.join(
+                                            args.model_dir,
+                                            "checkpoints",
+                                            f"checkpoint-{args.revision}",
+                                        )
+                                    )
+                                    pbar.update()
+
+                                # We should save this regardless, because it's our fallback if no snapshot exists.
+                                status.textinfo = (
+                                    f"Saving diffusion model at step {args.revision}..."
+                                )
+                                pbar.set_description("Saving diffusion model")
+                                s_pipeline.save_pretrained(
+                                    os.path.join(args.model_dir, "working"),
+                                    safe_serialization=True,
+                                )
+                                if ema_model is not None:
+                                    ema_model.save_pretrained(
+                                        os.path.join(
+                                            args.pretrained_model_name_or_path,
+                                            "ema_unet",
+                                        ),
+                                        safe_serialization=True,
+                                    )
+                                pbar.update()
+
+                            elif save_lora:
+                                pbar.set_description("Saving Lora Weights...")
+                                # setup directory
+                                loras_dir = os.path.join(args.model_dir, "loras")
+                                os.makedirs(loras_dir, exist_ok=True)
+                                # setup pt path
+                                if args.custom_model_name == "":
+                                    lora_model_name = args.model_name
+                                else:
+                                    lora_model_name = args.custom_model_name
+                                lora_file_prefix = f"{lora_model_name}_{args.revision}"
+                                out_file = os.path.join(
+                                    loras_dir, f"{lora_file_prefix}.pt"
+                                )
+                                # create pt
+                                tgt_module = get_target_module(
+                                    "module", args.use_lora_extended
+                                )
+                                save_lora_weight(s_pipeline.unet, out_file, tgt_module)
+
+                                modelmap = {"unet": (s_pipeline.unet, tgt_module)}
+                                # save text_encoder
+                                if stop_text_percentage != 0:
+                                    out_txt = out_file.replace(".pt", "_txt.pt")
+                                    modelmap["text_encoder"] = (
+                                        s_pipeline.text_encoder,
+                                        TEXT_ENCODER_DEFAULT_TARGET_REPLACE,
+                                    )
+                                    save_lora_weight(
+                                        s_pipeline.text_encoder,
+                                        out_txt,
+                                        target_replace_module=TEXT_ENCODER_DEFAULT_TARGET_REPLACE,
+                                    )
+                                    pbar.update()
+                                # save extra_net
+                                if args.save_lora_for_extra_net:
+                                    os.makedirs(
+                                        shared.ui_lora_models_path, exist_ok=True
+                                    )
+                                    out_safe = os.path.join(
+                                        shared.ui_lora_models_path,
+                                        f"{lora_file_prefix}.safetensors",
+                                    )
+                                    save_extra_networks(modelmap, out_safe)
+                            # package pt into checkpoint
+                            if save_checkpoint:
+                                pbar.set_description("Compiling Checkpoint")
+                                snap_rev = str(args.revision) if save_snapshot else ""
+                                if export_diffusers:
+                                    copy_diffusion_model(args.model_name, diffusers_dir)
+                                else:
+                                    compile_checkpoint(args.model_name, reload_models=False, lora_file_name=out_file,
+                                                       log=False, snap_rev=snap_rev, pbar=pbar)
+                                printm("Restored, moved to acc.device.")
+                        except Exception as ex:
+                            print(f"Exception saving checkpoint/model: {ex}")
+                            traceback.print_exc()
+                            pass
+
+                    save_dir = args.model_dir
+                    if save_image:
+                        samples = []
+                        sample_prompts = []
+                        last_samples = []
+                        last_prompts = []
+                        status.textinfo = (
+                            f"Saving preview image(s) at step {args.revision}..."
+                        )
+                        try:
+                            s_pipeline.set_progress_bar_config(disable=True)
+                            sample_dir = os.path.join(save_dir, "samples")
+                            os.makedirs(sample_dir, exist_ok=True)
+                            with accelerator.autocast(), torch.inference_mode():
+                                sd = SampleDataset(args)
+                                prompts = sd.prompts
+                                concepts = args.concepts()
+                                if args.sanity_prompt:
+                                    epd = PromptData(
+                                        prompt=args.sanity_prompt,
+                                        seed=args.sanity_seed,
+                                        negative_prompt=concepts[
+                                            0
+                                        ].save_sample_negative_prompt,
+                                        resolution=(args.resolution, args.resolution),
+                                    )
+                                    prompts.append(epd)
+                                pbar.set_description("Generating Samples")
+                                pbar.reset(len(prompts) + 2)
+                                ci = 0
+                                for c in prompts:
+                                    c.out_dir = os.path.join(args.model_dir, "samples")
+                                    generator = torch.manual_seed(int(c.seed))
+                                    s_image = s_pipeline(
+                                        c.prompt,
+                                        num_inference_steps=c.steps,
+                                        guidance_scale=c.scale,
+                                        negative_prompt=c.negative_prompt,
+                                        height=c.resolution[1],
+                                        width=c.resolution[0],
+                                        generator=generator,
+                                    ).images[0]
+                                    sample_prompts.append(c.prompt)
+                                    image_name = db_save_image(
+                                        s_image,
+                                        c,
+                                        custom_name=f"sample_{args.revision}-{ci}",
+                                    )
+                                    shared.status.current_image = image_name
+                                    shared.status.sample_prompts = [c.prompt]
+                                    samples.append(image_name)
+                                    pbar.update()
+                                    ci += 1
+                                for sample in samples:
+                                    last_samples.append(sample)
+                                for prompt in sample_prompts:
+                                    last_prompts.append(prompt)
+                                del samples
+                                del prompts
+
+                        except Exception as em:
+                            print(f"Exception saving sample: {em}")
+                            traceback.print_exc()
+                            pass
+                printm("Starting cleanup.")
+                del s_pipeline
+                if save_image:
+                    if "generator" in locals():
+                        del generator
+                    try:
+                        printm("Parse logs.")
+                        log_images, log_names = log_parser.parse_logs(
+                            model_name=args.model_name
+                        )
+                        pbar.update()
+                        for log_image in log_images:
+                            last_samples.append(log_image)
+                        for log_name in log_names:
+                            last_prompts.append(log_name)
+                        send_training_update(
+                            last_samples,
+                            args.model_name,
+                            last_prompts,
+                            global_step,
+                            args.revision,
+                        )
+
+                        del log_images
+                        del log_names
+                    except Exception as l:
+                        traceback.print_exc()
+                        print(f"Exception parsing logz: {l}")
+                        pass
+                    status.sample_prompts = last_prompts
+                    status.current_image = last_samples
+                    pbar.update()
+
+                if args.cache_latents:
+                    printm("Unloading vae.")
+                    del vae
+                    # Preserve the reference again
+                    vae = None
+
+                status.current_image = last_samples
+                printm("Cleanup.")
+
+                optim_to(profiler, optimizer, accelerator.device)
+
+                # Restore all random states to avoid having sampling impact training.
+                if shared.device.type == 'cuda':
+                    torch.set_rng_state(torch_rng_state)
+                    torch.cuda.set_rng_state(cuda_cpu_rng_state, device="cpu")
+                    torch.cuda.set_rng_state(cuda_gpu_rng_state, device="cuda")
+
+                cleanup()
+                printm("Completed saving weights.")
 
         # Only show the progress bar once on each machine.
         progress_bar = mytqdm(
@@ -852,7 +1151,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                     else:
                         noise = torch.randn_like(
                             latents, device=latents.device
-                        ) + args.offset_noise * torch.randn(
+                        ) + random.choice([0, 0.5, 1.0]) * args.offset_noise * torch.randn(
                             latents.shape[0],
                             latents.shape[1],
                             1,
@@ -874,25 +1173,108 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                     # (this is the forward diffusion process)
                     noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                     pad_tokens = args.pad_tokens if train_tenc else False
-                    encoder_hidden_states = encode_hidden_state(
+
+                    token_chunks = ['' for x in range(0, int(batch["input_ids"].shape[0] / b_size))]
+                    token_chunks[0] = args.concepts()[0].instance_token
+
+                    instance_token = tokenizer(token_chunks,
+                                               padding='max_length', truncation=True,
+                                               add_special_tokens=True, return_tensors="pt").input_ids.to(latents.device)
+
+                    randomized_clip_skip = random.randint(1, args.clip_skip)
+
+                    instance_token_batch = instance_token.repeat((b_size, 1))
+                    instance_token_encoder_hidden_states = encode_hidden_state(
                         text_encoder,
-                        batch["input_ids"],
+                        instance_token_batch,
                         pad_tokens,
                         b_size,
                         args.max_token_length,
                         tokenizer.model_max_length,
-                        args.clip_skip,
-                    )
+                        randomized_clip_skip)
 
+                    instance_token_encoder_hidden_states = instance_token_encoder_hidden_states.reshape((b_size, -1, instance_token_encoder_hidden_states.shape[-1]))
+
+                    # TODO - this is the mask stuff
+                    # mixing_weight = 0.75
+                    # with torch.no_grad():
+                    #     instance_token_unpadded = tokenizer(args.concepts()[0].instance_token,
+                    #                                padding=True, truncation=True,
+                    #                                add_special_tokens=False, return_tensors="pt").input_ids.to(latents.device)
+                    #
+                    #     instance_token_len = instance_token_unpadded.size()[1]
+                    #
+                    #     instance_mask = torch.zeros_like(instance_token_encoder_hidden_states)
+                    #     instance_mask += mixing_weight
+                    #     instance_mask[:, 1:1+instance_token_len] += (1.0 - mixing_weight)
+                    #
+                    #     prompt_mask = torch.ones_like(instance_token_encoder_hidden_states)
+                    #     prompt_mask -= (1.0 - mixing_weight)
+                    #     prompt_mask[:, 1:1+instance_token_len] -= mixing_weight
+                    #
+                    #     # tokens_without_instance_encoder_hidden_states = encode_hidden_state(
+                    #     #     text_encoder,
+                    #     #     rolled_ids,
+                    #     #     pad_tokens,
+                    #     #     b_size,
+                    #     #     args.max_token_length,
+                    #     #     tokenizer.model_max_length,
+                    #     #     randomized_clip_skip)
+                    #     # noise_pred_without_instance = unet(noisy_latents, timesteps, tokens_without_instance_encoder_hidden_states).sample
+                    #
+                    #     regular_tokens_encoder_hidden_states = encode_hidden_state(
+                    #         text_encoder,
+                    #         batch["input_ids"],
+                    #         pad_tokens,
+                    #         b_size,
+                    #         args.max_token_length,
+                    #         tokenizer.model_max_length,
+                    #         randomized_clip_skip)
+                    #     regular_tokens_encoder_hidden_states = regular_tokens_encoder_hidden_states.reshape((b_size, -1, instance_token_encoder_hidden_states.shape[-1]))
+                    #     regular_tokens_encoder_hidden_states = regular_tokens_encoder_hidden_states * prompt_mask
+                    #     # noise_pred_regular = unet(noisy_latents, timesteps, regular_tokens_encoder_hidden_states).sample
+                    # instance_token_encoder_hidden_states = (instance_token_encoder_hidden_states * instance_mask) + regular_tokens_encoder_hidden_states
+
+                    # combined_hidden_states = torch.cat((instance_token_encoder_hidden_states, tokens_without_instance_encoder_hidden_states), dim=1)
                     # Predict the noise residual
-                    if args.use_ema and args.ema_predict:
-                        noise_pred = ema_model(
-                            noisy_latents, timesteps, encoder_hidden_states
-                        ).sample
-                    else:
-                        noise_pred = unet(
-                            noisy_latents, timesteps, encoder_hidden_states
-                        ).sample
+                    # if args.use_ema and args.ema_predict:
+                    #     noise_pred = ema_model(
+                    #         # everything else (so far)
+                    #         # noisy_latents, timesteps, instance_token_encoder_hidden_states
+                    #         # combined-1
+                    #         noisy_latents, timesteps, combined_hidden_states
+                    #     ).sample
+                    # else:
+                    noise_pred = unet(
+                        # everything else (so far)
+                        noisy_latents, timesteps, instance_token_encoder_hidden_states
+                        # combined-1
+                        # noisy_latents, timesteps, combined_hidden_states
+                        # combative
+                        # noisy_latents, timesteps, (regular_tokens_encoder_hidden_states - tokens_without_instance_encoder_hidden_states)
+                    ).sample
+
+                    """
+                        for single concept:
+                        instance_token = args.concepts()[0].instance_token
+                        
+                        encoder hidden states is the weights for each of the tokens in the prompt (stacked by batch size)
+                        we predict the noise with the full prompt, but how do we get the loss for the term in question?
+                        
+                        
+                        mse_loss(e_n, e_0 - (negative_guidance*(e_p - e_0))) #loss = criteria(e_n, e_0) works the best try 5000 epochs
+                        
+                        e_0 is the empty prompt conditioning
+                        e_p is the prompt conditioning
+                        e_0 - (negative_guidance*(e_p - e_0)
+                        since this is deleting data this means:
+                        "isolate the target prompt (e_p - e_0) and subtract that from the empty prompt"
+                        this produces a value that is the inverse of the prompt value
+
+                        to emulate this, for my use case, we take the class image prompt and the target image prompt
+                        subtract the class prompt from the target prompt
+                        
+                    """
 
                     # Get the target for loss depending on the prediction type
                     if noise_scheduler.config.prediction_type == "v_prediction":
@@ -900,67 +1282,40 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                     else:
                         target = noise
 
-                    if not args.split_loss:
-                        loss = instance_loss = torch.nn.functional.mse_loss(
-                            noise_pred.float(), target.float(), reduction="none"
-                        ).mean([1, 2, 3])
-                        loss *= batch["loss_avg"]
+                    loss = torch.nn.functional.mse_loss(
+                        # 1) seems to work best so far - stayed alive for  ~2800 epochs, seems relatively consistent with preserving prior
+                        # subtractive-15
+                        # (noise_pred + (noise_pred_regular - noise_pred_without_instance).detach()).float(), target.float(), reduction="none"
+                        # subtractive-15.5
+                        # (noise_pred - (noise_pred_regular - noise_pred_without_instance).detach()).float(), target.float(), reduction="none"
 
-                    else:
-                        model_pred_chunks = torch.split(noise_pred, 1, dim=0)
-                        target_pred_chunks = torch.split(target, 1, dim=0)
-                        instance_chunks = []
-                        prior_chunks = []
-                        instance_pred_chunks = []
-                        prior_pred_chunks = []
 
-                        # Iterate over the list of boolean values in batch["types"]
-                        for i, is_prior in enumerate(batch["types"]):
-                            # If is_prior is False, append the corresponding chunk to instance_chunks
-                            if not is_prior:
-                                instance_chunks.append(model_pred_chunks[i])
-                                instance_pred_chunks.append(target_pred_chunks[i])
-                            # If is_prior is True, append the corresponding chunk to prior_chunks
-                            else:
-                                prior_chunks.append(model_pred_chunks[i])
-                                prior_pred_chunks.append(target_pred_chunks[i])
+                        # 2) started going dark at 320 steps (20 epochs) - recovered later.  VERY GOOD at preserving prior
+                        # subtractive-16 (16.2 is 16 but with special tokens in the tenc hidden states)
+                        # (noise_pred - noise_pred_without_instance).float(), target.float(), reduction="none"
 
-                        # initialize with 0 in case we are having batch = 1
-                        instance_loss = torch.tensor(0.0)
-                        prior_loss = torch.tensor(0.0)
 
-                        # Concatenate the chunks in instance_chunks to form the model_pred_instance tensor
-                        if len(instance_chunks):
-                            model_pred = torch.stack(instance_chunks, dim=0)
-                            target = torch.stack(instance_pred_chunks, dim=0)
-                            instance_loss = torch.nn.functional.mse_loss(
-                                model_pred.float(), target.float(), reduction="none"
-                            ).mean([1, 2, 3, 4])
+                        # 3) not very good, affected prior and blew out text encoder within 600 epochs
+                        # subtractive-17
+                        # (noise_pred + (noise_pred_regular - noise_pred_without_instance)).float(), target.float(), reduction="none"
 
-                        if len(prior_pred_chunks):
-                            model_pred_prior = torch.stack(prior_chunks, dim=0)
-                            target_prior = torch.stack(prior_pred_chunks, dim=0)
-                            prior_loss = torch.nn.functional.mse_loss(
-                                model_pred_prior.float(),
-                                target_prior.float(),
-                                reduction="none",
-                            ).mean([1, 2, 3, 4])
+                        # 4) seems to do okay, might blow out the tenc for the target term but may need more training to see
+                        # combined-1
+                        noise_pred.float(), target.float(), reduction="none"
 
-                        if len(instance_chunks) and len(prior_chunks):
-                            # Add the prior loss to the instance loss.
-                            loss = torch.zeros(len(instance_chunks) + len(prior_chunks), device=accelerator.device)
-                            # If the first entry is a prior, ensure that the prior is first in the array
-                            if batch["types"][0]:
-                                loss[1::2] = instance_loss
-                                loss[::2] = current_prior_loss_weight * prior_loss
-                            else:
-                                loss[::2] = instance_loss
-                                loss[1::2] = current_prior_loss_weight * prior_loss
-                            # loss = instance_loss + current_prior_loss_weight * prior_loss
-                        elif len(instance_chunks):
-                            loss = instance_loss
-                        else:
-                            loss = prior_loss * current_prior_loss_weight
+                        # 5) doubt this works any better than the rest
+                        # subtractive-18
+                        # (noise_pred - noise_pred_regular).float(), target.float(), reduction="none"
+                    ).mean([1, 2, 3])
+
+                    # without_instance_loss = torch.nn.functional.mse_loss(
+                    #     noise_pred_without_instance.float(), target.float(), reduction="none"
+                    # ).mean([1, 2, 3])
+                    #
+                    # compared_loss = torch.nn.functional.mse_loss(
+                    #     noise_pred_without_instance.float(), noise_pred.float(), reduction="none"
+                    # ).mean([1, 2, 3])
+                    #
 
                     loss = apply_snr_weight(loss, timesteps, noise_scheduler, 5.0)
                     loss = loss.mean()
@@ -993,7 +1348,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
 
                 del noise_pred
                 del latents
-                del encoder_hidden_states
+                del instance_token_encoder_hidden_states
                 del noise
                 del timesteps
                 del noisy_latents
@@ -1001,20 +1356,11 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
 
                 loss_step = loss.detach().item()
                 loss_total += loss_step
-                if args.split_loss:
-                    logs = {
-                        "lr": float(last_lr),
-                        "loss": float(loss_step),
-                        "inst_loss": float(instance_loss.detach().mean().item()),
-                        "prior_loss": float(prior_loss.detach().mean().item()),
-                        "vram": float(cached),
-                    }
-                else:
-                    logs = {
-                        "lr": float(last_lr),
-                        "loss": float(loss_step),
-                        "vram": float(cached),
-                    }
+                logs = {
+                    "lr": float(last_lr),
+                    "loss": float(loss_step),
+                    "vram": float(cached),
+                }
 
                 status.textinfo2 = (
                     f"Loss: {'%.2f' % loss_step}, LR: {'{:.2E}'.format(Decimal(last_lr))}, "
@@ -1059,7 +1405,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
             global_epoch += 1
             lifetime_epoch += 1
             session_epoch += 1
-            lr_scheduler.step(is_epoch=True)
+            # lr_scheduler.step(is_epoch=True)
             status.job_count = max_train_steps
             status.job_no = global_step
 
@@ -1101,6 +1447,8 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
         result.config = args
         result.samples = last_samples
         stop_profiler(profiler)
+
+        set_seed(False)
         return result
 
     return inner_loop()
@@ -1118,290 +1466,3 @@ def apply_snr_weight(loss, timesteps, noise_scheduler, gamma):
     snr_weight = torch.minimum(gamma_over_snr,torch.ones_like(gamma_over_snr)).float().to(loss.device) #from paper
     loss = loss * snr_weight
     return loss
-
-def save_weights(
-        args, accelerator, profiler, optimizer, unet, text_encoder, save_image, save_model, save_snapshot, save_checkpoint, save_lora
-):
-    global last_samples
-    global last_prompts
-    nonlocal vae
-
-    precision = args.mixed_precision if not shared.force_cpu else "no"
-
-    weight_dtype = torch.float32
-    if precision == "fp16":
-        weight_dtype = torch.float16
-    elif precision == "bf16":
-        weight_dtype = torch.bfloat16
-
-    printm(" Saving weights.")
-    pbar = mytqdm(
-        range(4),
-        desc="Saving weights",
-        disable=not accelerator.is_local_main_process,
-        position=1
-    )
-    pbar.set_postfix(refresh=True)
-
-    # Create the pipeline using the trained modules and save it.
-    if accelerator.is_main_process:
-        printm("Pre-cleanup.")
-
-        # Save random states so sample generation doesn't impact training.
-        if shared.device.type == 'cuda':
-            torch_rng_state = torch.get_rng_state()
-            cuda_gpu_rng_state = torch.cuda.get_rng_state(device="cuda")
-            cuda_cpu_rng_state = torch.cuda.get_rng_state(device="cpu")
-
-        optim_to(profiler, optimizer)
-
-        if profiler is not None:
-            cleanup()
-
-        if vae is None:
-            printm("Loading vae.")
-            vae = create_vae()
-
-        printm("Creating pipeline.")
-
-        s_pipeline = DiffusionPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            unet=accelerator.unwrap_model(unet, keep_fp32_wrapper=True),
-            text_encoder=accelerator.unwrap_model(
-                text_encoder, keep_fp32_wrapper=True
-            ),
-            vae=vae,
-            torch_dtype=weight_dtype,
-            revision=args.revision,
-            safety_checker=None,
-            requires_safety_checker=None,
-        )
-
-        scheduler_class = get_scheduler_class(args.scheduler)
-        if args.attention == "xformers" and not shared.force_cpu:
-            xformerify(s_pipeline)
-
-        s_pipeline.scheduler = scheduler_class.from_config(
-            s_pipeline.scheduler.config
-        )
-        if "UniPC" in args.scheduler:
-            s_pipeline.scheduler.config.solver_type = "bh2"
-
-        s_pipeline = s_pipeline.to(accelerator.device)
-
-        with accelerator.autocast(), torch.inference_mode():
-            if save_model:
-                # We are saving weights, we need to ensure revision is saved
-                args.save()
-                try:
-                    out_file = None
-                    # Loras resume from pt
-                    if not args.use_lora:
-                        if save_snapshot:
-                            pbar.set_description("Saving Snapshot")
-                            status.textinfo = (
-                                f"Saving snapshot at step {args.revision}..."
-                            )
-                            accelerator.save_state(
-                                os.path.join(
-                                    args.model_dir,
-                                    "checkpoints",
-                                    f"checkpoint-{args.revision}",
-                                )
-                            )
-                            pbar.update()
-
-                        # We should save this regardless, because it's our fallback if no snapshot exists.
-                        status.textinfo = (
-                            f"Saving diffusion model at step {args.revision}..."
-                        )
-                        pbar.set_description("Saving diffusion model")
-                        s_pipeline.save_pretrained(
-                            os.path.join(args.model_dir, "working"),
-                            safe_serialization=True,
-                        )
-                        if ema_model is not None:
-                            ema_model.save_pretrained(
-                                os.path.join(
-                                    args.pretrained_model_name_or_path,
-                                    "ema_unet",
-                                ),
-                                safe_serialization=True,
-                            )
-                        pbar.update()
-
-                    elif save_lora:
-                        pbar.set_description("Saving Lora Weights...")
-                        # setup directory
-                        loras_dir = os.path.join(args.model_dir, "loras")
-                        os.makedirs(loras_dir, exist_ok=True)
-                        # setup pt path
-                        if args.custom_model_name == "":
-                            lora_model_name = args.model_name
-                        else:
-                            lora_model_name = args.custom_model_name
-                        lora_file_prefix = f"{lora_model_name}_{args.revision}"
-                        out_file = os.path.join(
-                            loras_dir, f"{lora_file_prefix}.pt"
-                        )
-                        # create pt
-                        tgt_module = get_target_module(
-                            "module", args.use_lora_extended
-                        )
-                        save_lora_weight(s_pipeline.unet, out_file, tgt_module)
-
-                        modelmap = {"unet": (s_pipeline.unet, tgt_module)}
-                        # save text_encoder
-                        if stop_text_percentage != 0:
-                            out_txt = out_file.replace(".pt", "_txt.pt")
-                            modelmap["text_encoder"] = (
-                                s_pipeline.text_encoder,
-                                TEXT_ENCODER_DEFAULT_TARGET_REPLACE,
-                            )
-                            save_lora_weight(
-                                s_pipeline.text_encoder,
-                                out_txt,
-                                target_replace_module=TEXT_ENCODER_DEFAULT_TARGET_REPLACE,
-                            )
-                            pbar.update()
-                        # save extra_net
-                        if args.save_lora_for_extra_net:
-                            os.makedirs(
-                                shared.ui_lora_models_path, exist_ok=True
-                            )
-                            out_safe = os.path.join(
-                                shared.ui_lora_models_path,
-                                f"{lora_file_prefix}.safetensors",
-                            )
-                            save_extra_networks(modelmap, out_safe)
-                    # package pt into checkpoint
-                    if save_checkpoint:
-                        pbar.set_description("Compiling Checkpoint")
-                        snap_rev = str(args.revision) if save_snapshot else ""
-                        if export_diffusers:
-                            copy_diffusion_model(args.model_name, diffusers_dir)
-                        else:
-                            compile_checkpoint(args.model_name, reload_models=False, lora_file_name=out_file,
-                                               log=False, snap_rev=snap_rev, pbar=pbar)
-                        printm("Restored, moved to acc.device.")
-                except Exception as ex:
-                    print(f"Exception saving checkpoint/model: {ex}")
-                    traceback.print_exc()
-                    pass
-
-            save_dir = args.model_dir
-            if save_image:
-                samples = []
-                sample_prompts = []
-                last_samples = []
-                last_prompts = []
-                status.textinfo = (
-                    f"Saving preview image(s) at step {args.revision}..."
-                )
-                try:
-                    s_pipeline.set_progress_bar_config(disable=True)
-                    sample_dir = os.path.join(save_dir, "samples")
-                    os.makedirs(sample_dir, exist_ok=True)
-                    with accelerator.autocast(), torch.inference_mode():
-                        sd = SampleDataset(args)
-                        prompts = sd.prompts
-                        concepts = args.concepts()
-                        if args.sanity_prompt:
-                            epd = PromptData(
-                                prompt=args.sanity_prompt,
-                                seed=args.sanity_seed,
-                                negative_prompt=concepts[
-                                    0
-                                ].save_sample_negative_prompt,
-                                resolution=(args.resolution, args.resolution),
-                            )
-                            prompts.append(epd)
-                        pbar.set_description("Generating Samples")
-                        pbar.reset(len(prompts) + 2)
-                        ci = 0
-                        for c in prompts:
-                            c.out_dir = os.path.join(args.model_dir, "samples")
-                            generator = torch.manual_seed(int(c.seed))
-                            s_image = s_pipeline(
-                                c.prompt,
-                                num_inference_steps=c.steps,
-                                guidance_scale=c.scale,
-                                negative_prompt=c.negative_prompt,
-                                height=c.resolution[1],
-                                width=c.resolution[0],
-                                generator=generator,
-                            ).images[0]
-                            sample_prompts.append(c.prompt)
-                            image_name = db_save_image(
-                                s_image,
-                                c,
-                                custom_name=f"sample_{args.revision}-{ci}",
-                            )
-                            shared.status.current_image = image_name
-                            shared.status.sample_prompts = [c.prompt]
-                            samples.append(image_name)
-                            pbar.update()
-                            ci += 1
-                        for sample in samples:
-                            last_samples.append(sample)
-                        for prompt in sample_prompts:
-                            last_prompts.append(prompt)
-                        del samples
-                        del prompts
-
-                except Exception as em:
-                    print(f"Exception saving sample: {em}")
-                    traceback.print_exc()
-                    pass
-        printm("Starting cleanup.")
-        del s_pipeline
-        if save_image:
-            if "generator" in locals():
-                del generator
-            try:
-                printm("Parse logs.")
-                log_images, log_names = log_parser.parse_logs(
-                    model_name=args.model_name
-                )
-                pbar.update()
-                for log_image in log_images:
-                    last_samples.append(log_image)
-                for log_name in log_names:
-                    last_prompts.append(log_name)
-                send_training_update(
-                    last_samples,
-                    args.model_name,
-                    last_prompts,
-                    global_step,
-                    args.revision,
-                )
-
-                del log_images
-                del log_names
-            except Exception as l:
-                traceback.print_exc()
-                print(f"Exception parsing logz: {l}")
-                pass
-            status.sample_prompts = last_prompts
-            status.current_image = last_samples
-            pbar.update()
-
-        if args.cache_latents:
-            printm("Unloading vae.")
-            del vae
-            # Preserve the reference again
-            vae = None
-
-        status.current_image = last_samples
-        printm("Cleanup.")
-
-        optim_to(profiler, optimizer, accelerator.device)
-
-        # Restore all random states to avoid having sampling impact training.
-        if shared.device.type == 'cuda':
-            torch.set_rng_state(torch_rng_state)
-            torch.cuda.set_rng_state(cuda_cpu_rng_state, device="cpu")
-            torch.cuda.set_rng_state(cuda_gpu_rng_state, device="cuda")
-
-        cleanup()
-        printm("Completed saving weights.")

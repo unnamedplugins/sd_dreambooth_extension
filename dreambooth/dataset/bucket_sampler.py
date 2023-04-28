@@ -1,3 +1,4 @@
+import math
 import random
 from typing import Tuple
 
@@ -19,7 +20,7 @@ class BucketSampler:
         self.set_buckets()
 
     def __iter__(self):
-        while self.total_samples < len(self.dataset):
+        while self.total_samples < self.get_num_steps():
             batch = self.fill_batch()
             if len(batch) == 0:
                 raise StopIteration
@@ -74,7 +75,6 @@ class BucketSampler:
         batch = []
         repeats = 0
         while len(batch) < self.batch_size:
-            self.dataset.active_resolution = current_res
             img_index, img_repeats = self.dataset.get_example(current_res)
             # next_item = torch.as_tensor(next_item, device='cpu', dtype=torch.float)
             if img_repeats != 0:
@@ -97,6 +97,16 @@ class BucketSampler:
             print("Well, this is bad. We have no batch data.")
             raise StopIteration
         return self.batch.pop()
+
+    def get_num_steps(self):
+        self.dataset.shuffle_buckets()
+        b_size = self.batch_size
+        num_steps = 0
+        for _, reso in enumerate(self.dataset.sample_dict):
+            sz = math.ceil(len(self.dataset.sample_dict[reso]) / b_size)
+            num_steps = num_steps + (sz * b_size)
+        return num_steps
+
 
 
 class BucketCounter:

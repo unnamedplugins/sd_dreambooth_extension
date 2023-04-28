@@ -5,10 +5,54 @@ import torch
 import torch.utils.checkpoint
 from transformers import CLIPTextModel
 
+def smart_split_input_ids(input_ids, pad_tokens, b_size, max_token_length,
+                          tokenizer_max_length):
+    comma_token = 267
+    start_token = input_ids[0]
+    end_token = input_ids[-1]
+    size_limit = tokenizer_max_length - 2
+    batch_id_list : List[List[int]] = input_ids.tolist()
+    for prompt in batch_id_list:
+        prompt_parts = torch.tensor([], device=input_ids.device)
+        chunks = max_token_length / size_limit
+        for x in range(0, chunks):
+            start = x * size_limit + 1
+            if start > len(prompt):
+                padding = torch.full(tokenizer_max_length, end_token, device=input_ids.device)
+                padding[0] = start_token
+                prompt_parts = torch.cat((prompt_parts, ))
+
+            chunk = prompt[start:(start + size_limit)]
+            if len(chunk) > size_limit:
+                if comma_token in chunk:
+                    last_idx = chunk[::-1].index(comma_token)
+
+            start = 0
+            found = prompt.index(comma_token, start, start + size_limit)
+
 
 # Implementation from https://github.com/bmaltais/kohya_ss
 def encode_hidden_state(text_encoder: CLIPTextModel, input_ids, pad_tokens, b_size, max_token_length,
                         tokenizer_max_length, clip_skip):
+
+    # smart_split_input_ids(input_ids,
+    #                       pad_tokens,
+    #                       b_size,
+    #                       max_token_length,
+    #                       tokenizer_max_length)
+
+    # extend = (self.max_tokens + 2) - input_ids.shape[-1]
+    # if extend > 0:
+    #     input_ids = torch.cat((input_ids, torch.full((1,extend), input_ids[0][-1])), dim=1)
+    # elif extend < 0:
+    #     endtoken = input_ids[0, -1]
+    #     input_ids = input_ids[:,0:(self.max_tokens+2)]
+    #     input_ids[0, -1] = endtoken
+
+    # if input_ids.shape[-1] > max_token_length:
+
+
+
     if pad_tokens:
         input_ids = input_ids.reshape((-1, tokenizer_max_length))  # batch_size*3, 77
 

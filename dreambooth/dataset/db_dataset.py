@@ -36,7 +36,8 @@ class DbDataset(torch.utils.data.Dataset):
             strict_tokens: bool,
             not_pad_tokens: bool,
             debug_dataset: bool,
-            model_dir: str
+            model_dir: str,
+            max_tokens: int
     ) -> None:
         super().__init__()
         self.batch_indices = []
@@ -81,6 +82,7 @@ class DbDataset(torch.utils.data.Dataset):
         self.not_pad_tokens = not_pad_tokens
         self.strict_tokens = strict_tokens
         self.tokens = tokens
+        self.max_tokens = max_tokens
         self.vae = None
         self.cache_latents = False
         flip_p = 0.5 if hflip else 0.0
@@ -133,14 +135,60 @@ class DbDataset(torch.utils.data.Dataset):
                 caption = shuffle_tags(caption)
             if self.strict_tokens:
                 caption = build_strict_tokens(caption, self.tokenizer.bos_token, self.tokenizer.eos_token)
+
             if self.not_pad_tokens:
                 input_ids = self.tokenizer(caption, padding=True, truncation=True,
                                            add_special_tokens=auto_add_special_tokens,
                                            return_tensors="pt").input_ids
             else:
-                input_ids = self.tokenizer(caption, padding='max_length', truncation=True,
-                                           add_special_tokens=auto_add_special_tokens,
-                                           return_tensors='pt').input_ids
+                if self.shuffle_tags:
+                    tags = caption.split(',')
+                    tokens = [self.tokenizer(tag,
+                                             padding=False,
+                                             truncation=False,
+                                             add_special_tokens=False,
+                                             return_tensors='pt').input_ids
+                              for tag in tags]
+                    chunks = []
+                    tags_temp : List[str] = []
+                    size_temp = 0
+                    while tags:
+                        tag = tags.pop(0)
+                        token = tokens.pop(0)
+                        size = token.shape[-1] + (1 if tags else 0)
+                        if (size_temp + size) > 75:
+                            chunks.append(','.join(tags_temp))
+                            tags_temp = []
+                            size_temp = 0
+
+                        tags_temp.append(tag)
+                        size_temp += size
+
+                    if len(tags_temp) > 0:
+                        chunks.append(','.join(tags_temp))
+
+                    while len(chunks) < self.max_tokens / 75:
+                        chunks.append('')
+
+                    chunks = chunks[0:int(self.max_tokens / 75)]
+
+
+                    input_ids = self.tokenizer(chunks, padding='max_length', truncation=False,
+                                               add_special_tokens=auto_add_special_tokens,
+                                               return_tensors='pt').input_ids
+
+                else:
+                    input_ids = self.tokenizer(caption, padding='max_length', truncation=False,
+                                               add_special_tokens=auto_add_special_tokens,
+                                               return_tensors='pt').input_ids
+                    extend = (self.max_tokens + 2) - input_ids.shape[1]
+                    if extend > 0:
+                        input_ids = torch.cat((input_ids, torch.full((1,extend), input_ids[0][-1])), dim=1)
+                    elif extend < 0:
+                        endtoken = input_ids[0, -1]
+                        input_ids = input_ids[:,0:(self.max_tokens+2)]
+                        input_ids[0, -1] = endtoken
+
             if not self.shuffle_tags:
                 self.caption_cache[image_path] = input_ids
         return caption, input_ids
@@ -295,29 +343,26 @@ class DbDataset(torch.utils.data.Dataset):
         return self._length
 
     def get_example(self, res):
+        if self.active_resolution != res:
+            self.image_index = 0
+            self.active_resolution = res
+
         # Select the current bucket of image paths
         bucket = self.sample_dict[res]
 
         # Set start position from last iteration
-        img_index = self.image_index
-
-        # Reset image index (double-check)
-        if img_index >= len(bucket):
-            img_index = 0
+        img_index = self.image_index % len(bucket)
 
         repeats = 0
         # Grab instance image data
         image_path, caption, is_class_image = bucket[img_index]
         image_index = self.sample_indices.index(image_path)
 
-        img_index += 1
-
         # Reset image index
-        if img_index >= len(bucket):
-            img_index = 0
+        if self.image_index >= len(bucket):
             repeats += 1
 
-        self.image_index = img_index
+        self.image_index += 1
 
         return image_index, repeats
 

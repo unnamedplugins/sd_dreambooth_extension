@@ -18,6 +18,8 @@ ui_keys = []
 
 
 def sanitize_name(name):
+    if type(name) == list:
+        name = name[0]
     return "".join(x for x in name if (x.isalnum() or x in "._- "))
 
 

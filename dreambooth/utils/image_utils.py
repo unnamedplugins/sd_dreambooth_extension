@@ -141,6 +141,10 @@ def sort_prompts(
         for res, count in bucket_count.items():
             if count < min(bucket_avg_size, 4):
                 lonely_buckets.append(res)
+                # Don't exclude the square bucket
+                # w, h = res
+                # if w != h:
+                #     lonely_buckets.append(res)
 
         # find a new home for the lonely bucket images
         for bucket in lonely_buckets:

@@ -18,7 +18,7 @@ from helpers.mytqdm import mytqdm
 
 
 def generate_dataset(model_name: str, instance_prompts: List[PromptData] = None, class_prompts: List[PromptData] = None,
-                     batch_size=None, tokenizer=None, vae=None, debug=True, model_dir=""):
+                     batch_size=None, tokenizer=None, vae=None, debug=True, model_dir="", max_tokens=75):
     if debug:
         print("Generating dataset.")
     from dreambooth.ui_functions import gr_update
@@ -64,7 +64,8 @@ def generate_dataset(model_name: str, instance_prompts: List[PromptData] = None,
         strict_tokens=args.strict_tokens,
         not_pad_tokens=not args.pad_tokens,
         debug_dataset=debug,
-        model_dir=model_dir
+        model_dir=model_dir,
+        max_tokens=max_tokens,
     )
     train_dataset.make_buckets_with_caching(vae)
 
