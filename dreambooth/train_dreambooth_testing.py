@@ -393,13 +393,26 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
 
         # TODO resnets, attentions
         # 'attention' in param[0] and
+        # unet_params_to_optimize = [x[1] for x in filter(lambda param: ('mid_block' in param[0] or 'down_blocks.2' in param[0] or 'down_blocks.1.downsamplers' in param[0]), list(unet.named_parameters()))]
+        # unet_params_to_optimize = [x[1] for x in filter(lambda param: ('mid_block' in param[0] or 'down_blocks.2' in param[0] or 'down_blocks.1.downsamplers' in param[0]), list(unet.named_parameters()))]
         # unet_params_to_optimize = [x[1] for x in filter(lambda param: ('mid_block' in param[0] or 'down_blocks.2' in param[0]), list(unet.named_parameters()))]
         # unet_params_to_optimize = [x[1] for x in filter(lambda param: 'attention' in param[0] and ('mid_block' in param[0] or 'down_blocks.2' in param[0]), list(unet.named_parameters()))]
         # unet_params_to_optimize = [x[1] for x in filter(lambda param: 'attention' in param[0] and 'mid_block' in param[0], list(unet.named_parameters()))]
-        unet_params_to_optimize = [x[1] for x in filter(lambda param: 'mid_block' in param[0], list(unet.named_parameters()))]
+        # unet_params_to_optimize = [x[1] for x in filter(lambda param: 'attention' in param[0], list(unet.named_parameters()))]
+        # unet_params_to_optimize = [x[1] for x in filter(lambda param: 'mid_block' in param[0], list(unet.named_parameters()))]
+        unet_params_to_optimize = [x[1] for x in filter(lambda param: 'attention' in param[0]
+                                                                      and "down_blocks.1.resnets.1" not in param[0]
+                                                                      and "down_blocks.1.attentions.1" not in param[0]
+                                                                      and "down_blocks.2.resnets.0" not in param[0]
+                                                                      and "down_blocks.2.attentions.0" not in param[0]
+                                                                      and "down_blocks.0" not in param[0]
+                                                                      and "up_blocks.3" not in param[0], list(unet.named_parameters()))]
         # unet_params_to_optimize = unet.parameters()
 
-        tenc_params_to_optimize = [x[1] for x in filter(lambda param: 'attn' in param[0], list(text_encoder.named_parameters()))]
+        # tenc_params_to_optimize = [x[1] for x in filter(lambda param: 'attn' in param[0], list(text_encoder.named_parameters()))]
+        # tenc_params_to_optimize = [x[1] for x in filter(lambda param: 'attn' not in param[0], list(text_encoder.named_parameters()))]
+        # tenc_params_to_optimize = [x[1] for x in filter(lambda param: 'embeddings' in param[0], list(text_encoder.named_parameters()))]
+        tenc_params_to_optimize = [x[1] for x in filter(lambda param: 'embeddings.token_embedding' in param[0], list(text_encoder.named_parameters()))]
         # tenc_params_to_optimize = text_encoder.parameters()
         if args.use_lora:
             if args.lora_model_name:
@@ -450,11 +463,21 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
 
         elif stop_text_percentage != 0:
             if args.train_unet:
+                params_to_optimize = [{
+                        "params": itertools.chain(unet_params_to_optimize),
+                        "lr": args.learning_rate,
+                    },
+                    {
+                        "params": itertools.chain(tenc_params_to_optimize),
+                        "lr": args.tenc_learning_rate,
+                    }
+                ]
 
-                params_to_optimize = itertools.chain(unet_params_to_optimize,
-                                                     tenc_params_to_optimize)
             else:
-                params_to_optimize = itertools.chain(tenc_params_to_optimize)
+                params_to_optimize = [{
+                        "params": itertools.chain(tenc_params_to_optimize),
+                        "lr": args.tenc_learning_rate,
+                }]
         else:
             params_to_optimize = unet_params_to_optimize
 
@@ -705,7 +728,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
         print(f"  EMA: {args.use_ema}")
         print(f"  UNET: {args.train_unet}")
         print(f"  Freeze CLIP Normalization Layers: {args.freeze_clip_normalization}")
-        print(f"  LR: {args.learning_rate}")
+        print(f"  LR: unet: {args.learning_rate} tenc: {args.tenc_learning_rate}")
         if args.use_lora_extended:
             print(f"  LoRA Extended: {args.use_lora_extended}")
         if args.use_lora and stop_text_percentage > 0:
@@ -1181,7 +1204,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                                                padding='max_length', truncation=True,
                                                add_special_tokens=True, return_tensors="pt").input_ids.to(latents.device)
 
-                    randomized_clip_skip = random.randint(1, args.clip_skip)
+                    randomized_clip_skip = random.randint(args.clip_skip, args.clip_skip)
 
                     instance_token_batch = instance_token.repeat((b_size, 1))
                     instance_token_encoder_hidden_states = encode_hidden_state(
@@ -1196,44 +1219,44 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                     instance_token_encoder_hidden_states = instance_token_encoder_hidden_states.reshape((b_size, -1, instance_token_encoder_hidden_states.shape[-1]))
 
                     # TODO - this is the mask stuff
-                    # mixing_weight = 0.75
-                    # with torch.no_grad():
-                    #     instance_token_unpadded = tokenizer(args.concepts()[0].instance_token,
-                    #                                padding=True, truncation=True,
-                    #                                add_special_tokens=False, return_tensors="pt").input_ids.to(latents.device)
-                    #
-                    #     instance_token_len = instance_token_unpadded.size()[1]
-                    #
-                    #     instance_mask = torch.zeros_like(instance_token_encoder_hidden_states)
-                    #     instance_mask += mixing_weight
-                    #     instance_mask[:, 1:1+instance_token_len] += (1.0 - mixing_weight)
-                    #
-                    #     prompt_mask = torch.ones_like(instance_token_encoder_hidden_states)
-                    #     prompt_mask -= (1.0 - mixing_weight)
-                    #     prompt_mask[:, 1:1+instance_token_len] -= mixing_weight
-                    #
-                    #     # tokens_without_instance_encoder_hidden_states = encode_hidden_state(
-                    #     #     text_encoder,
-                    #     #     rolled_ids,
-                    #     #     pad_tokens,
-                    #     #     b_size,
-                    #     #     args.max_token_length,
-                    #     #     tokenizer.model_max_length,
-                    #     #     randomized_clip_skip)
-                    #     # noise_pred_without_instance = unet(noisy_latents, timesteps, tokens_without_instance_encoder_hidden_states).sample
-                    #
-                    #     regular_tokens_encoder_hidden_states = encode_hidden_state(
-                    #         text_encoder,
-                    #         batch["input_ids"],
-                    #         pad_tokens,
-                    #         b_size,
-                    #         args.max_token_length,
-                    #         tokenizer.model_max_length,
-                    #         randomized_clip_skip)
-                    #     regular_tokens_encoder_hidden_states = regular_tokens_encoder_hidden_states.reshape((b_size, -1, instance_token_encoder_hidden_states.shape[-1]))
-                    #     regular_tokens_encoder_hidden_states = regular_tokens_encoder_hidden_states * prompt_mask
-                    #     # noise_pred_regular = unet(noisy_latents, timesteps, regular_tokens_encoder_hidden_states).sample
-                    # instance_token_encoder_hidden_states = (instance_token_encoder_hidden_states * instance_mask) + regular_tokens_encoder_hidden_states
+                    mixing_weight = 1.0
+                    with torch.no_grad():
+                        instance_token_unpadded = tokenizer(args.concepts()[0].instance_token,
+                                                   padding=True, truncation=True,
+                                                   add_special_tokens=False, return_tensors="pt").input_ids.to(latents.device)
+
+                        instance_token_len = instance_token_unpadded.size()[1]
+
+                        instance_mask = torch.zeros_like(instance_token_encoder_hidden_states)
+                        instance_mask += mixing_weight
+                        instance_mask[:, 1:1+instance_token_len] += (1.0 - mixing_weight)
+
+                        prompt_mask = torch.ones_like(instance_token_encoder_hidden_states)
+                        prompt_mask -= (1.0 - mixing_weight)
+                        prompt_mask[:, 1:1+instance_token_len] -= mixing_weight
+
+                        # tokens_without_instance_encoder_hidden_states = encode_hidden_state(
+                        #     text_encoder,
+                        #     rolled_ids,
+                        #     pad_tokens,
+                        #     b_size,
+                        #     args.max_token_length,
+                        #     tokenizer.model_max_length,
+                        #     randomized_clip_skip)
+                        # noise_pred_without_instance = unet(noisy_latents, timesteps, tokens_without_instance_encoder_hidden_states).sample
+
+                        regular_tokens_encoder_hidden_states = encode_hidden_state(
+                            text_encoder,
+                            batch["input_ids"],
+                            pad_tokens,
+                            b_size,
+                            args.max_token_length,
+                            tokenizer.model_max_length,
+                            randomized_clip_skip)
+                        regular_tokens_encoder_hidden_states = regular_tokens_encoder_hidden_states.reshape((b_size, -1, instance_token_encoder_hidden_states.shape[-1]))
+                        regular_tokens_encoder_hidden_states = regular_tokens_encoder_hidden_states * prompt_mask
+                        # noise_pred_regular = unet(noisy_latents, timesteps, regular_tokens_encoder_hidden_states).sample
+                    instance_token_encoder_hidden_states = (instance_token_encoder_hidden_states * instance_mask) + regular_tokens_encoder_hidden_states
 
                     # combined_hidden_states = torch.cat((instance_token_encoder_hidden_states, tokens_without_instance_encoder_hidden_states), dim=1)
                     # Predict the noise residual
@@ -1353,6 +1376,10 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                 del timesteps
                 del noisy_latents
                 del target
+                del regular_tokens_encoder_hidden_states
+                del instance_mask
+                del prompt_mask
+                del instance_token_unpadded
 
                 loss_step = loss.detach().item()
                 loss_total += loss_step

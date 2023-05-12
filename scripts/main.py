@@ -449,6 +449,9 @@ def on_ui_tabs():
                                 db_learning_rate = gr.Number(
                                     label="Learning Rate", value=2e-6
                                 )
+                                db_tenc_learning_rate = gr.Number(
+                                    label="Text Encoder Learning Rate", value=2e-6
+                                )
 
                             db_lr_scheduler = gr.Dropdown(
                                 label="Learning Rate Scheduler",
@@ -1211,6 +1214,7 @@ def on_ui_tabs():
             db_hflip,
             db_infer_ema,
             db_learning_rate,
+            db_tenc_learning_rate,
             db_learning_rate_min,
             db_lora_learning_rate,
             db_lora_model_name,

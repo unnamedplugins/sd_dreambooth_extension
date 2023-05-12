@@ -127,28 +127,35 @@ def sort_prompts(
         for bucket in bucket_resos:
             bucket_count[bucket] = 0
 
+        bucket_images = {}
         for img in images:
             pbar.set_description(f"Pre-processing images: {dirr}")
             w, h = get_dim(img, max_dim)
             reso = closest_resolution(w, h, bucket_resos)
             if reso not in bucket_count:
                 bucket_count[reso] = 0
+            if reso not in bucket_images:
+                bucket_images[reso] = []
             bucket_count[reso] += 1
+            bucket_images[reso].append(img)
 
-        num_buckets = len(bucket_count)
+        nonempty_buckets = {key: bucket_count[key] for key in bucket_count.keys() if bucket_count[key] != 0}
+        num_buckets = len(nonempty_buckets)
         bucket_avg_size = len(images) / num_buckets
-        lonely_buckets = []
-        for res, count in bucket_count.items():
-            if count < min(bucket_avg_size, 4):
-                lonely_buckets.append(res)
-                # Don't exclude the square bucket
-                # w, h = res
-                # if w != h:
-                #     lonely_buckets.append(res)
-
-        # find a new home for the lonely bucket images
-        for bucket in lonely_buckets:
-            bucket_resos.remove(bucket)
+        threshold = min(bucket_avg_size, 4)
+        removal_candidates = sorted([x for x in [x for x in nonempty_buckets.keys() if nonempty_buckets[x] < threshold]], key=lambda x: (-nonempty_buckets[x], abs(1-x[0]/x[1])))[::-1]
+        while len(removal_candidates) > 0:
+            candidate = removal_candidates[0]
+            imgs = bucket_images[candidate]
+            del nonempty_buckets[candidate]
+            del bucket_images[candidate]
+            for img in imgs:
+                w, h = get_dim(img, max_dim)
+                closest = closest_resolution(w, h, nonempty_buckets.keys())
+                nonempty_buckets[closest] += 1
+                bucket_images[closest].append(img)
+            removal_candidates = sorted([x for x in [x for x in nonempty_buckets.keys() if nonempty_buckets[x] < threshold]], key=lambda x: (-nonempty_buckets[x], abs(1-x[0]/x[1])))[::-1]
+        bucket_resos = nonempty_buckets.keys()
 
     for img in images:
         # Get prompt

@@ -54,6 +54,7 @@ class DreamboothConfig(BaseModel):
     infer_ema: bool = False
     initial_revision: int = 0
     learning_rate: float = 5e-6
+    tenc_learning_rate: float = 2e-6
     learning_rate_min: float = 1e-6
     lifetime_revision: int = 0
     lora_learning_rate: float = 1e-4

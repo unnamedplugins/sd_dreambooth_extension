@@ -236,6 +236,14 @@ def enable_safe_unpickle():
 
 
 def xformerify(obj):
+    try:
+        from diffusers.models.attention_processor import AttnProcessor2_0
+        print("Enabling SDP")
+        obj.set_attn_processor(AttnProcessor2_0())
+        return
+    except:
+        pass
+
     if is_xformers_available():
         try:
             obj.enable_xformers_memory_efficient_attention()
