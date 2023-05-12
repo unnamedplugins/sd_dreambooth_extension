@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import traceback
 from typing import List, Dict
@@ -25,45 +26,41 @@ def sanitize_name(name):
 
 class DreamboothConfig(BaseModel):
     # These properties MUST be sorted alphabetically
-    adamw_weight_decay: float = 0.01
-    adaptation_beta1: int = 0
-    adaptation_beta2: int = 0
-    adaptation_d0: float = 1e-8
-    adaptation_eps: float = 1e-8
+    weight_decay: float = 0.01
     attention: str = "xformers"
     cache_latents: bool = True
     clip_skip: int = 1
     concepts_list: List[Dict] = []
     concepts_path: str = ""
     custom_model_name: str = ""
-    noise_scheduler: str = "DDPM"
     deterministic: bool = False
+    disable_class_matching: bool = False
+    disable_logging: bool = False
     ema_predict: bool = False
     epoch: int = 0
     epoch_pause_frequency: int = 0
     epoch_pause_time: int = 0
-    freeze_clip_normalization: bool = True
+    freeze_clip_normalization: bool = False
     gradient_accumulation_steps: int = 1
     gradient_checkpointing: bool = True
     gradient_set_to_none: bool = True
     graph_smoothing: int = 50
     half_model: bool = False
-    train_unfrozen: bool = True
     has_ema: bool = False
     hflip: bool = False
     infer_ema: bool = False
     initial_revision: int = 0
     learning_rate: float = 5e-6
-    tenc_learning_rate: float = 2e-6
     learning_rate_min: float = 1e-6
     lifetime_revision: int = 0
     lora_learning_rate: float = 1e-4
     lora_model_name: str = ""
-    lora_unet_rank: int = 4
-    lora_txt_rank: int = 4
     lora_txt_learning_rate: float = 5e-5
+    lora_txt_rank: int = 4
     lora_txt_weight: float = 1.0
+    lora_unet_rank: int = 4
     lora_weight: float = 1.0
+    lora_use_buggy_requires_grad: bool = False
     lr_cycles: int = 1
     lr_factor: float = 0.5
     lr_power: float = 1.0
@@ -72,9 +69,10 @@ class DreamboothConfig(BaseModel):
     lr_warmup_steps: int = 0
     max_token_length: int = 75
     mixed_precision: str = "fp16"
-    model_name: str = ""
     model_dir: str = ""
+    model_name: str = ""
     model_path: str = ""
+    noise_scheduler: str = "DDPM"
     num_train_epochs: int = 100
     offset_noise: float = 0
     optimizer: str = "8bit AdamW"
@@ -106,26 +104,34 @@ class DreamboothConfig(BaseModel):
     save_state_cancel: bool = False
     save_state_during: bool = False
     scheduler: str = "ddim"
+    shared_diffusers_path: str = ""
     shuffle_tags: bool = True
     snapshot: str = ""
     split_loss: bool = True
     src: str = ""
     stop_text_encoder: float = 1.0
     strict_tokens: bool = False
-    tf32_enable: bool = False
+    dynamic_img_norm: bool = False
+    tenc_weight_decay: float = 0.01
+    tenc_grad_clip_norm: float = 0.00
+    tomesd: float = 0
     train_batch_size: int = 1
     train_imagic: bool = False
     train_unet: bool = True
+    train_unfrozen: bool = True
+    txt_learning_rate: float = 2e-6
     use_concepts: bool = False
     use_ema: bool = True
     use_lora: bool = False
     use_lora_extended: bool = False
+    use_shared_src: bool = False,
     use_subdir: bool = False
     v2: bool = False
 
     def __init__(
             self,
             model_name: str = "",
+            model_dir: str = "",
             v2: bool = False,
             src: str = "",
             resolution: int = 512,
@@ -133,14 +139,19 @@ class DreamboothConfig(BaseModel):
     ):
 
         super().__init__(**kwargs)
-        model_name = sanitize_name(model_name)
-        models_path = shared.dreambooth_models_path
-        if models_path == "" or models_path is None:
-            models_path = os.path.join(shared.models_path, "dreambooth")
 
-        # If we're using the new UI, this should be populated, so load models from here.
-        if len(shared.paths):
-            models_path = os.path.join(shared.paths["models"], "dreambooth")
+        model_name = sanitize_name(model_name)
+        if "models_path" in kwargs:
+            models_path = kwargs["models_path"]
+            print(f"Using models path: {models_path}")
+        else:
+            models_path = shared.dreambooth_models_path
+            if models_path == "" or models_path is None:
+                models_path = os.path.join(shared.models_path, "dreambooth")
+
+            # If we're using the new UI, this should be populated, so load models from here.
+            if len(shared.paths):
+                models_path = os.path.join(shared.paths["models"], "dreambooth")
 
         if not self.use_lora:
             self.lora_model_name = ""
@@ -166,12 +177,24 @@ class DreamboothConfig(BaseModel):
         Save the config file
         """
         models_path = self.model_dir
+        logger = logging.getLogger(__name__)
+        logger.debug("Saving to %s", models_path)
+
+        if os.name == 'nt' and '/' in models_path:
+            # replace linux path separators with windows path separators
+            models_path = models_path.replace('/', '\\')
+        elif os.name == 'posix' and '\\' in models_path:
+            # replace windows path separators with linux path separators
+            models_path = models_path.replace('\\', '/')
+        self.model_dir = models_path
         config_file = os.path.join(models_path, "db_config.json")
+
         if backup:
             backup_dir = os.path.join(models_path, "backups")
             if not os.path.exists(backup_dir):
                 os.makedirs(backup_dir)
             config_file = os.path.join(models_path, "backups", f"db_config_{self.revision}.json")
+
         with open(config_file, "w") as outfile:
             json.dump(self.__dict__, outfile, indent=4)
 
@@ -210,6 +233,9 @@ class DreamboothConfig(BaseModel):
             #       "new": "..."
             #   }]
             # }
+            "weight_decay": {
+                "new_key": "weight_decay",
+            },
             "deis_train_scheduler": {
                 "new_key": "noise_scheduler",
                 "values": [{
@@ -233,9 +259,9 @@ class DreamboothConfig(BaseModel):
 
         if key in replaced_params.keys():
             replacement = replaced_params[key]
-            if hasattr(replacement, "new_key"):
+            if "new_key" in replacement:
                 key = replacement["new_key"]
-            if hasattr(replacement, "values"):
+            if "values" in replacement:
                 for _value in replacement["values"]:
                     if value in _value["old"]:
                         value = _value["new"]
@@ -312,6 +338,11 @@ class DreamboothConfig(BaseModel):
             traceback.print_exc()
             return None
 
+    def get_pretrained_model_name_or_path(self):
+        if self.shared_diffusers_path != "" and not self.use_lora:
+            raise Exception(f"shared_diffusers_path is \"{self.shared_diffusers_path}\" but use_lora is false")
+        return self.shared_diffusers_path if self.shared_diffusers_path != "" else self.pretrained_model_name_or_path
+
 
 def concepts_from_file(concepts_path: str):
     concepts = []
@@ -338,10 +369,6 @@ def concepts_from_file(concepts_path: str):
 def save_config(*args):
     params = list(args)
     concept_keys = ["c1_", "c2_", "c3_", "c4_"]
-    model_name = params[0]
-    if model_name is None or model_name == "":
-        print("Invalid model name.")
-        return
     params_dict = dict(zip(save_keys, params))
     concepts_list = []
     # If using a concepts file/string, keep concepts_list empty.
@@ -361,6 +388,11 @@ def save_config(*args):
         if len(concepts_list) and not len(existing_concepts):
             params_dict["concepts_list"] = concepts_list
 
+    model_name = params_dict["db_model_name"]
+    if model_name is None or model_name == "":
+        print("Invalid model name.")
+        return
+
     config = from_file(model_name)
     if config is None:
         config = DreamboothConfig(model_name)
@@ -369,25 +401,30 @@ def save_config(*args):
     config.save()
 
 
-def from_file(model_name):
+def from_file(model_name, model_dir=None):
     """
     Load config data from UI
     Args:
         model_name: The config to load
+        model_dir: If specified, override the default model directory
 
     Returns: Dict | None
 
     """
     if isinstance(model_name, list) and len(model_name) > 0:
         model_name = model_name[0]
-        
+
     if model_name == "" or model_name is None:
         return None
 
-    model_name = sanitize_name(model_name)
-    models_path = shared.dreambooth_models_path
-    if models_path == "" or models_path is None:
-        models_path = os.path.join(shared.models_path, "dreambooth")
+    #model_name = sanitize_name(model_name)
+    if model_dir:
+        models_path = model_dir
+        shared.dreambooth_models_path = models_path
+    else:
+        models_path = shared.dreambooth_models_path
+        if models_path == "" or models_path is None:
+            models_path = os.path.join(shared.models_path, "dreambooth")
     config_file = os.path.join(models_path, model_name, "db_config.json")
     try:
         with open(config_file, 'r') as openfile:

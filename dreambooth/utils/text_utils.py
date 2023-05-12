@@ -2,7 +2,6 @@ import re
 from typing import List
 
 import torch
-import torch.utils.checkpoint
 from transformers import CLIPTextModel
 
 def smart_split_input_ids(input_ids, pad_tokens, b_size, max_token_length,
@@ -34,25 +33,6 @@ def smart_split_input_ids(input_ids, pad_tokens, b_size, max_token_length,
 # Implementation from https://github.com/bmaltais/kohya_ss
 def encode_hidden_state(text_encoder: CLIPTextModel, input_ids, pad_tokens, b_size, max_token_length,
                         tokenizer_max_length, clip_skip):
-
-    # smart_split_input_ids(input_ids,
-    #                       pad_tokens,
-    #                       b_size,
-    #                       max_token_length,
-    #                       tokenizer_max_length)
-
-    # extend = (self.max_tokens + 2) - input_ids.shape[-1]
-    # if extend > 0:
-    #     input_ids = torch.cat((input_ids, torch.full((1,extend), input_ids[0][-1])), dim=1)
-    # elif extend < 0:
-    #     endtoken = input_ids[0, -1]
-    #     input_ids = input_ids[:,0:(self.max_tokens+2)]
-    #     input_ids[0, -1] = endtoken
-
-    # if input_ids.shape[-1] > max_token_length:
-
-
-
     if pad_tokens:
         input_ids = input_ids.reshape((-1, tokenizer_max_length))  # batch_size*3, 77
 

@@ -18,7 +18,6 @@ from typing import List, Tuple, Dict, Union
 
 import numpy as np
 import torch
-import torch.utils.checkpoint
 
 from dreambooth.dataclasses.db_concept import Concept
 from dreambooth.dataclasses.prompt_data import PromptData
@@ -43,19 +42,22 @@ def get_dim(filename, max_res):
 
 
 def rotate_image_straight(image: Image) -> Image:
-    exif: Image.Exif = image.getexif()
-    if exif:
-        orientation_tag = {v: k for k, v in ExifTags.TAGS.items()}['Orientation']
-        orientation = exif.get(orientation_tag)
-        degree = {
-            3: 180,
-            6: 270,
-            8: 90,
-        }.get(orientation)
-        if degree:
-            image = image.rotate(degree, expand=True)
-    # else:
-    #     print(f"No exif data for {image.filename}. Using default orientation.")
+    try:
+        exif: Image.Exif = image.getexif()
+        if exif:
+            orientation_tag = {v: k for k, v in ExifTags.TAGS.items()}['Orientation']
+            orientation = exif.get(orientation_tag)
+            degree = {
+                3: 180,
+                6: 270,
+                8: 90,
+            }.get(orientation)
+            if degree:
+                image = image.rotate(degree, expand=True)
+        # else:
+        #     print(f"No exif data for {image.filename}. Using default orientation.")
+    except:
+        pass
     return image
 
 
@@ -224,7 +226,9 @@ class FilenameTextGetter:
         if instance_token and class_token:
             instance_regex = re.compile(f"\\b{instance_token}\\b", flags=re.IGNORECASE)
             class_regex = re.compile(f"\\b{class_token}\\b", flags=re.IGNORECASE)
-            extended_class_regexes = list(re.compile(r) for r in [f"a {class_token}", f"the {class_token}", f"an {class_token}"])
+            extended_class_regexes = list(
+                re.compile(r) for r in [f"a {class_token}", f"the {class_token}", f"an {class_token}"]
+            )
 
             if is_class:
                 if instance_regex.search(output):
@@ -321,31 +325,6 @@ def make_bucket_resolutions(max_resolution, divisible=64) -> List[Tuple[int, int
 
             resos.add((w, h))
             resos.add((h, w))
-
-
-
-    # midmult = int(max_resolution/divisible)
-    # maxmult = int(midmult * 2 - minmult)
-    #
-    #
-    # for x in range(startmult, midmult):
-    #     w = (midmult - x) * divisible
-    #     h = (midmult + x) * divisible
-    #     resos.add((w, h))
-    #     resos.add((h, w))
-
-    # aspect_ratios = [(16, 9), (7, 5), (5, 4), (4, 3), (3, 2), (2, 1), (1, 1)]
-    #
-    # for ar in aspect_ratios:
-    #     d0 = max_resolution
-    #     d1_t = (max_resolution / ar[0]) * ar[1]
-    #     d1 = int((d1_t // divisible) * divisible)
-    #
-    #     w = d0
-    #     h = d1
-    #
-    #     resos.add((w, h))
-    #     resos.add((h, w))
 
     resos = list(resos)
     resos.sort()
@@ -498,7 +477,7 @@ try:
 
         return output_images
 except:
-    print("Oops, no txt2img available. Oh well.")
+    pass
 
 
     def process_txt2img(p: StableDiffusionProcessing) -> None:
@@ -529,6 +508,11 @@ def open_and_trim(image_path: str, reso: Tuple[int, int], return_pil: bool = Fal
 
     # Convert to RGB if necessary
     if image.mode != "RGB":
+        # If given image has Alpha Channel, flatten it instead of removing A channel
+        if image.mode.endswith("A"):
+            bg = Image.new("RGB", image.size, "white")
+            bg.paste(image, mask=image.split()[3])
+            image = bg
         image = image.convert("RGB")
 
     # Upscale image if necessary

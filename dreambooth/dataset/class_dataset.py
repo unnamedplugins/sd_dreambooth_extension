@@ -16,7 +16,7 @@ from helpers.mytqdm import mytqdm
 class ClassDataset(Dataset):
     """A simple dataset to prepare the prompts to generate class images on multiple GPUs."""
 
-    def __init__(self, concepts: [Concept], model_dir: str, max_width: int, shuffle: bool):
+    def __init__(self, concepts: [Concept], model_dir: str, max_width: int, shuffle: bool, disable_class_matching: bool, pbar: mytqdm = None):
         # Existing training image data
         self.instance_prompts = []
         # Existing class image data
@@ -49,8 +49,12 @@ class ClassDataset(Dataset):
             total_images += len(class_images[concept_idx])
 
         status.textinfo = "Sorting images..."
-        pbar = mytqdm(desc="Pre-processing images.", position=0)
-        pbar.reset(total_images)
+        if pbar is None:
+            pbar = mytqdm(desc="Pre-processing images.", position=0)
+            pbar.reset(total_images)
+        else:
+            pbar.set_description("Pre-processing images.")
+            pbar.reset(total_images)
 
         for concept_idx, concept in enumerate(concepts):
             if not concept.is_valid:
@@ -69,6 +73,12 @@ class ClassDataset(Dataset):
 
             # ===== Class =====
             if concept.num_class_images_per <= 0 or not class_dir:
+                continue
+
+            if disable_class_matching:
+                class_prompt_buckets = sort_prompts(concept, text_getter, class_dir, class_images[concept_idx], bucket_resos, concept_idx, True, pbar)
+                for class_prompt_datas in class_prompt_buckets.values():
+                    self.class_prompts.extend(class_prompt_datas)
                 continue
 
             required_prompt_buckets = sort_prompts(concept, text_getter, class_dir, instance_images[concept_idx], bucket_resos, concept_idx, True, pbar)

@@ -1,3 +1,30 @@
 .btn-top {
     min-width: 150px;
 }
+
+.db_adv {
+    display: none;
+}
+
+.linkBtn {
+    position: absolute;
+    right: 0;
+    top: 050%;
+    border: 1px solid var(--bs-border-dark);
+    border-radius: 5px;
+}
+
+.linkBtn * {
+    color: var(--primary-accent-text-color);
+}
+
+.linkBtn:hover * {
+    color: var(--primary-accent-color);
+    background-color: var(--primary-accent-text-color);
+}
+
+.linkBtn.active * {
+    background-color: var(--primary-color);
+    color: var(--primary-text-color);
+}
+
